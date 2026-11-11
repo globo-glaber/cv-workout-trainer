@@ -1,0 +1,17 @@
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Virtual Environments
+.venv/
+venv/
+env/
+
+# Downloaded AI Models
+*.task
+
+# Test media
+*.mp4
+*.avi
+test_videos/
