@@ -1,55 +1,105 @@
 import cv2
 from config import ExerciseConfig
 
-def resize_maintaining_aspect_ratio(image, target_height=720):
-    """Rescales the image preventing pixel distortion by maintaining aspect ratio."""
+
+def resize_maintaining_aspect_ratio(image, target_height: int = 720):
+    """Rescales the image without pixel distortion by preserving aspect ratio."""
     h, w = image.shape[:2]
     aspect_ratio = w / h
     target_width = int(target_height * aspect_ratio)
     return cv2.resize(image, (target_width, target_height), interpolation=cv2.INTER_AREA)
 
-def draw_modern_ui(image, counter_left, counter_right, config: ExerciseConfig):
-    """Renders a dynamic, compact HUD that adjusts to video width and exercise type."""
-    h, w, _ = image.shape
-    
-    # Dynamic panel width: 35% of video width, but max 250px so it doesn't cover the screen
-    panel_w = min(250, int(w * 0.35))
-    
+
+def _format_angle(angle: float | None) -> str:
+    """Formats an angle value safely, ensuring 0.0 is never treated as missing."""
+    return f"{int(round(angle))} deg" if angle is not None else "-- deg"
+
+
+def _draw_counter_block(
+    image,
+    title: str,
+    counter,
+    y_start: int,
+    panel_w: int,
+    form_hint: str,
+    large: bool = False,
+) -> None:
+    angle_text = _format_angle(counter.smoothed_angle)
+    stage_text = counter.stage or "ready"
+
+    cv2.putText(image, title, (15, y_start), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+    cv2.putText(
+        image,
+        str(counter.counter),
+        (15, y_start + (40 if large else 35)),
+        cv2.FONT_HERSHEY_DUPLEX,
+        1.2 if large else 1.0,
+        (0, 255, 0),
+        2,
+    )
+    cv2.putText(
+        image,
+        f"Angle: {angle_text}",
+        (15, y_start + (68 if large else 58)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        (255, 255, 255),
+        1,
+    )
+    cv2.putText(
+        image,
+        f"Stage: {stage_text}",
+        (15, y_start + (88 if large else 76)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        (180, 220, 255),
+        1,
+    )
+
+    bar_y = y_start + (102 if large else 88)
+    bar_h = 14 if large else 10
+    prog = counter.get_progress_percent()
+    cv2.rectangle(image, (15, bar_y), (panel_w - 15, bar_y + bar_h), (100, 100, 100), 1)
+    cv2.rectangle(
+        image,
+        (15, bar_y),
+        (15 + int((panel_w - 30) * (prog / 100)), bar_y + bar_h),
+        (0, 255, 0),
+        -1,
+    )
+
+    if not counter.is_spatially_valid and form_hint:
+        cv2.putText(
+            image,
+            f"FORM: {form_hint}",
+            (15, bar_y + bar_h + 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            (0, 140, 255),
+            1,
+        )
+
+
+def draw_modern_ui(image, counter_left, counter_right, config: ExerciseConfig) -> None:
+    """Renders a compact HUD showing reps, pixel-space joint angles, stages, and form alerts."""
+    h, w = image.shape[:2]
+    panel_w = min(260, int(w * 0.36))
+
     overlay = image.copy()
     cv2.rectangle(overlay, (0, 0), (panel_w, h), (15, 15, 15), -1)
     cv2.addWeighted(overlay, 0.6, image, 0.4, 0, image)
 
-    # Header
     cv2.putText(image, config.name, (15, 30), cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
-    cv2.putText(image, "SPACE: Pause", (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
+    cv2.putText(image, "SPACE: Pause | Q: Quit", (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (160, 160, 160), 1)
 
     if config.is_bilateral:
-        # UNIFIED VIEW (For Squats) - Shows only one main counter
-        reps = counter_left.counter 
-        angle_text = f"{int(counter_left.smoothed_angle)} deg" if counter_left.smoothed_angle else "-- deg"
-        
-        cv2.putText(image, "TOTAL REPS", (15, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        cv2.putText(image, str(reps), (15, 150), cv2.FONT_HERSHEY_DUPLEX, 1.2, (0, 255, 0), 2)
-        cv2.putText(image, f"Angle: {angle_text}", (15, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        prog = counter_left.get_progress_percent()
-        cv2.rectangle(image, (15, 200), (panel_w - 15, 215), (100, 100, 100), 1)
-        cv2.rectangle(image, (15, 200), (15 + int((panel_w - 30) * (prog / 100)), 215), (0, 255, 0), -1)
-    
+        _draw_counter_block(
+            image, "TOTAL REPS", counter_left, 105, panel_w, config.form_hint, large=True
+        )
     else:
-        # SPLIT VIEW (For Bicep Curls) - Shows Left and Right independently
-        # Left Side
-        cv2.putText(image, "LEFT REPS", (15, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        cv2.putText(image, str(counter_left.counter), (15, 145), cv2.FONT_HERSHEY_DUPLEX, 1.0, (0, 255, 0), 2)
-        
-        prog_l = counter_left.get_progress_percent()
-        cv2.rectangle(image, (15, 160), (panel_w - 15, 170), (100, 100, 100), 1)
-        cv2.rectangle(image, (15, 160), (15 + int((panel_w - 30) * (prog_l / 100)), 170), (0, 255, 0), -1)
-
-        # Right Side
-        cv2.putText(image, "RIGHT REPS", (15, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        cv2.putText(image, str(counter_right.counter), (15, 255), cv2.FONT_HERSHEY_DUPLEX, 1.0, (0, 255, 0), 2)
-        
-        prog_r = counter_right.get_progress_percent()
-        cv2.rectangle(image, (15, 270), (panel_w - 15, 280), (100, 100, 100), 1)
-        cv2.rectangle(image, (15, 270), (15 + int((panel_w - 30) * (prog_r / 100)), 280), (0, 255, 0), -1)
+        _draw_counter_block(
+            image, "LEFT REPS", counter_left, 98, panel_w, config.form_hint, large=False
+        )
+        _draw_counter_block(
+            image, "RIGHT REPS", counter_right, 245, panel_w, config.form_hint, large=False
+        )

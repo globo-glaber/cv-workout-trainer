@@ -1,98 +1,169 @@
-import cv2
 import argparse
-from detector import PoseDetector
+import time
+
+import cv2
+
 from config import EXERCISES
-from counter import ExerciseCounter
+from counter import ExerciseCounter, calculate_pixel_angle, evaluate_form
+from detector import PoseDetector
 from ui import draw_modern_ui, resize_maintaining_aspect_ratio
+
+WINDOW_NAME = "CV Workout Tracker"
+QUIT_KEYS = {ord("q"), ord("Q"), 27, 233, 201}
+SIDE_SWITCH_HYSTERESIS = 0.15
+BILATERAL_MIN_VISIBILITY = 0.60
+UNILATERAL_MIN_VISIBILITY = 0.55
+
+
+def _to_tuple(landmark) -> tuple[float, float, float]:
+    return (landmark.x, landmark.y, landmark.visibility)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="CV Workout Tracker")
-    parser.add_argument('--source', type=str, default='0', help="0 for webcam, or path to .mp4")
-    parser.add_argument('--exercise', type=str, choices=['bicep', 'squat', 'pushup', 'shoulder_press'], default='bicep')
+    parser.add_argument("--source", type=str, default="0", help="0 for webcam, or path to .mp4")
+    parser.add_argument(
+        "--exercise",
+        type=str,
+        choices=list(EXERCISES.keys()),
+        default="bicep",
+    )
     args = parser.parse_args()
 
-    detector = PoseDetector()
     config = EXERCISES[args.exercise]
-    
-    # Initialize trackers
     counter_left = ExerciseCounter(config)
     counter_right = ExerciseCounter(config)
-    
+
     video_source = int(args.source) if args.source.isdigit() else args.source
     cap = cv2.VideoCapture(video_source)
+    is_live_camera = isinstance(video_source, int)
 
     if not cap.isOpened():
         print(f"Error: Cannot open video source {video_source}")
         return
 
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_duration_ms = 1000.0 / fps if fps and fps > 0 else 33.33
+
     paused = False
     frame = None
+    active_side: str | None = None
+    base_time_ms = time.monotonic() * 1000.0
+    last_ts_ms = -1
+    frame_idx = 0
 
-    while cap.isOpened():
-        if not paused:
-            ret, current_frame = cap.read()
-            if not ret:
-                print("Video stream ended.")
-                break
-            frame = current_frame.copy()
+    try:
+        with PoseDetector() as detector:
+            while cap.isOpened():
+                if not paused:
+                    ret, current_frame = cap.read()
+                    if not ret:
+                        print("Video stream ended.")
+                        break
 
-        if not paused and frame is not None:
-            processed_frame, results = detector.process_frame(frame)
+                    if is_live_camera:
+                        current_frame = cv2.flip(current_frame, 1)
 
-            if results.pose_landmarks:
-                landmarks = results.pose_landmarks[0]
-                
-                # Fetch points for both sides
-                jl1, jl2, jl3 = config.joints_left
-                l_p1, l_p2, l_p3 = landmarks[jl1], landmarks[jl2], landmarks[jl3]
-                
-                jr1, jr2, jr3 = config.joints_right
-                r_p1, r_p2, r_p3 = landmarks[jr1], landmarks[jr2], landmarks[jr3]
-                
-                vis_l = (l_p1.visibility + l_p2.visibility + l_p3.visibility) / 3
-                vis_r = (r_p1.visibility + r_p2.visibility + r_p3.visibility) / 3
+                    frame = current_frame.copy()
 
-                if config.is_bilateral:
-                    # Logic for unified movements (e.g., Squats, Push-ups)
-                    spatial_valid = True
-                    if vis_l > vis_r:
-                        if config.require_wrist_above_shoulder:
-                            spatial_valid = l_p3.y < l_p1.y
-                        angle = counter_left.calculate_angle([l_p1.x, l_p1.y], [l_p2.x, l_p2.y], [l_p3.x, l_p3.y])
+                if not paused and frame is not None:
+                    if is_live_camera:
+                        ts_ms = int((time.monotonic() * 1000.0) - base_time_ms)
                     else:
-                        if config.require_wrist_above_shoulder:
-                            spatial_valid = r_p3.y < r_p1.y
-                        angle = counter_left.calculate_angle([r_p1.x, r_p1.y], [r_p2.x, r_p2.y], [r_p3.x, r_p3.y])
-                        
-                    counter_left.update(angle, spatial_valid)
-                    
-                else:
-                    # Logic for independent arm tracking (e.g., Bicep Curls, Shoulder Press)
-                    spatial_valid_l = (l_p3.y < l_p1.y) if config.require_wrist_above_shoulder else True
-                    if vis_l > 0.5:
-                        angle_l = counter_left.calculate_angle([l_p1.x, l_p1.y], [l_p2.x, l_p2.y], [l_p3.x, l_p3.y])
-                        counter_left.update(angle_l, spatial_valid_l)
-                    
-                    spatial_valid_r = (r_p3.y < r_p1.y) if config.require_wrist_above_shoulder else True
-                    if vis_r > 0.5:
-                        angle_r = counter_right.calculate_angle([r_p1.x, r_p1.y], [r_p2.x, r_p2.y], [r_p3.x, r_p3.y])
-                        counter_right.update(angle_r, spatial_valid_r)
+                        pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+                        ts_ms = int(pos_ms) if pos_ms > 0 else int(frame_idx * frame_duration_ms)
+                        frame_idx += 1
 
-                detector.draw_landmarks(processed_frame, results)
+                    if ts_ms <= last_ts_ms:
+                        ts_ms = last_ts_ms + 1
+                    last_ts_ms = ts_ms
 
-            draw_modern_ui(processed_frame, counter_left, counter_right, config)
-            display_frame = resize_maintaining_aspect_ratio(processed_frame, target_height=720)
-            cv2.imshow('CV Workout Tracker', display_frame)
+                    processed_frame, results = detector.process_frame(frame, ts_ms)
 
-        # Keyboard controls (30ms delay)
-        key = cv2.waitKey(30) & 0xFF
-        if key == ord('q'):
-            break
-        elif key == ord(' '):  
-            paused = not paused
+                    if results.pose_landmarks:
+                        landmarks = results.pose_landmarks[0]
+                        h, w = processed_frame.shape[:2]
 
-    cap.release()
-    cv2.destroyAllWindows()
+                        jl1, jl2, jl3 = config.joints_left
+                        jr1, jr2, jr3 = config.joints_right
 
-if __name__ == '__main__':
+                        l1, l2, l3 = landmarks[jl1], landmarks[jl2], landmarks[jl3]
+                        r1, r2, r3 = landmarks[jr1], landmarks[jr2], landmarks[jr3]
+
+                        vis_l = (l1.visibility + l2.visibility + l3.visibility) / 3.0
+                        vis_r = (r1.visibility + r2.visibility + r3.visibility) / 3.0
+
+                        form_l = evaluate_form(
+                            config.form_rule,
+                            _to_tuple(landmarks[11]),
+                            _to_tuple(landmarks[13]),
+                            _to_tuple(landmarks[15]),
+                            _to_tuple(landmarks[23]),
+                            w,
+                            h,
+                        )
+                        form_r = evaluate_form(
+                            config.form_rule,
+                            _to_tuple(landmarks[12]),
+                            _to_tuple(landmarks[14]),
+                            _to_tuple(landmarks[16]),
+                            _to_tuple(landmarks[24]),
+                            w,
+                            h,
+                        )
+
+                        if config.is_bilateral:
+                            if active_side is None:
+                                active_side = "left" if vis_l >= vis_r else "right"
+                            else:
+                                new_side = active_side
+                                if active_side == "left" and vis_r > vis_l + SIDE_SWITCH_HYSTERESIS:
+                                    new_side = "right"
+                                elif active_side == "right" and vis_l > vis_r + SIDE_SWITCH_HYSTERESIS:
+                                    new_side = "left"
+
+                                if new_side != active_side:
+                                    active_side = new_side
+                                    counter_left.reset_smoothing()
+
+                            active_vis = vis_l if active_side == "left" else vis_r
+                            if active_vis >= BILATERAL_MIN_VISIBILITY:
+                                if active_side == "left":
+                                    angle = calculate_pixel_angle((l1.x, l1.y), (l2.x, l2.y), (l3.x, l3.y), w, h)
+                                    valid = form_l
+                                else:
+                                    angle = calculate_pixel_angle((r1.x, r1.y), (r2.x, r2.y), (r3.x, r3.y), w, h)
+                                    valid = form_r
+                                counter_left.update(angle, float(ts_ms), valid)
+                        else:
+                            if vis_l >= UNILATERAL_MIN_VISIBILITY:
+                                angle_l = calculate_pixel_angle((l1.x, l1.y), (l2.x, l2.y), (l3.x, l3.y), w, h)
+                                counter_left.update(angle_l, float(ts_ms), form_l)
+
+                            if vis_r >= UNILATERAL_MIN_VISIBILITY:
+                                angle_r = calculate_pixel_angle((r1.x, r1.y), (r2.x, r2.y), (r3.x, r3.y), w, h)
+                                counter_right.update(angle_r, float(ts_ms), form_r)
+
+                        detector.draw_landmarks(processed_frame, results)
+
+                    draw_modern_ui(processed_frame, counter_left, counter_right, config)
+                    display_frame = resize_maintaining_aspect_ratio(processed_frame, target_height=720)
+                    cv2.imshow(WINDOW_NAME, display_frame)
+
+                raw_key = cv2.waitKey(1)
+                if raw_key != -1:
+                    key = raw_key & 0xFF
+                    if key in QUIT_KEYS or raw_key in (ord("й"), ord("Й")):
+                        break
+                    elif key == ord(" "):
+                        paused = not paused
+
+                if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                    break
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
     main()
