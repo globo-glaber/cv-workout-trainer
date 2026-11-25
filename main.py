@@ -61,9 +61,6 @@ def main() -> None:
                         print("Video stream ended.")
                         break
 
-                    if is_live_camera:
-                        current_frame = cv2.flip(current_frame, 1)
-
                     frame = current_frame.copy()
 
                 if not paused and frame is not None:
@@ -146,6 +143,9 @@ def main() -> None:
 
                         detector.draw_landmarks(processed_frame, results)
 
+                    if is_live_camera:
+                        processed_frame = cv2.flip(processed_frame, 1)
+
                     draw_modern_ui(processed_frame, counter_left, counter_right, config)
                     display_frame = resize_maintaining_aspect_ratio(processed_frame, target_height=720)
                     cv2.imshow(WINDOW_NAME, display_frame)
@@ -153,7 +153,7 @@ def main() -> None:
                 raw_key = cv2.waitKey(1)
                 if raw_key != -1:
                     key = raw_key & 0xFF
-                    if key in QUIT_KEYS or raw_key in (ord("й"), ord("Й")):
+                    if key in QUIT_KEYS or raw_key in (0x0439, 0x0419):
                         break
                     elif key == ord(" "):
                         paused = not paused
